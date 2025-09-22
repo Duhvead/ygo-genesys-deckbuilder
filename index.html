@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YGO GENESYS Deckbuilder</title>
+    <style>
+        body { font-family: sans-serif; background-color: #333; color: #eee; padding: 20px; }
+        .card-wrapper { position: relative; display: inline-block; margin: 2px; cursor: pointer; border-radius: 5px; overflow: hidden; }
+        .card-wrapper img.card { width: 100px; height: auto; display: block; border-radius: 5px; }
+        .card-points-display { position: absolute; bottom: 0px; left: 0px; background-color: rgba(0, 0, 0, 0.7); color: yellow; padding: 2px 5px; font-size: 0.8em; font-weight: bold; border-top-right-radius: 5px; z-index: 10; pointer-events: none; line-height: 1; }
+        .container { display: flex; width: 100%; gap: 20px; }
+        .left-panel { flex: 1; display: flex; flex-direction: column; gap: 15px; }
+        .right-panel { flex: 3; background-color: #282828; padding: 10px; border-radius: 8px; }
+        .deck-section { border: 2px dashed #555; min-height: 120px; margin-bottom: 15px; padding: 5px; border-radius: 5px; background-color: #3a3a3a; }
+        .deck-cards { display: flex; flex-wrap: wrap; }
+        h2, h3 { margin-top: 0; color: #ddd; }
+        textarea, input { width: 95%; padding: 10px; background-color: #444; border: 1px solid #666; color: #eee; border-radius: 4px; }
+        #search-results { height: 500px; overflow-y: auto; border: 1px solid #555; padding: 5px; display: flex; flex-wrap: wrap; }
+        #point-total { position: fixed; top: 20px; right: 30px; background-color: #1a1a1a; padding: 15px 20px; border-radius: 8px; border: 1px solid #888; font-size: 1.2em; font-weight: bold; z-index: 1000; }
+        #auth-container { position: absolute; top: 20px; left: 20px; display: flex; align-items: center; gap: 10px; }
+        #user-greeting { font-weight: bold; }
+        button { background-color: #5a5a5a; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #7a7a7a; }
+    </style>
+</head>
+<body>
+
+    <div id="point-total">Total Points: 0</div>
+
+    <div id="auth-container">
+        <span id="user-greeting" style="display:none;"></span>
+        <button id="login-btn">Login with Google</button>
+        <button id="logout-btn" style="display:none;">Logout</button>
+    </div>
+
+    <div class="container" style="margin-top: 60px;">
+        <div class="left-panel">
+            <div>
+                <h3>Paste your .ydk File Content</h3>
+                <textarea id="ydk-input" rows="10" placeholder="Paste the content of your .ydk file here..."></textarea>
+                <button onclick="loadDeckFromYDK()">Load from YDK</button>
+            </div>
+            <div>
+                <h3>Search for Cards</h3>
+                <input type="text" id="search-box" placeholder="Type card name...">
+                <div id="search-results"></div>
+            </div>
+            <div>
+                <h3>Deck Actions</h3>
+                <button id="save-deck-btn" style="display:none;" onclick="saveDeck()">Save Deck</button>
+            </div>
+        </div>
+        <div class="right-panel">
+            <h2>Deck Viewer</h2>
+            <h3>Main Deck (<span id="main-count">0</span>)</h3>
+            <div class="deck-section"><div class="deck-cards" id="main-deck-cards"></div></div>
+            <h3>Extra Deck (<span id="extra-count">0</span>)</h3>
+            <div class="deck-section"><div class="deck-cards" id="extra-deck-cards"></div></div>
+            <h3>Side Deck (<span id="side-count">0</span>)</h3>
+            <div class="deck-section"><div class="deck-cards" id="side-deck-cards"></div></div>
+        </div>
+    </div>
+
+    <script src="card-points.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-firestore-compat.js"></script>
+
+    <script>
+        // ###############################################################
+        // ### PASTE YOUR FIREBASE CONFIG OBJECT HERE ###
+        // ###############################################################
+        const firebaseConfig = {
+           apiKey: "AIzaSyCRvIRSuJVb4It_lj8GKV2ebiMIQwrWuDA",
+            authDomain: "ygo-genesys-deckbuilder.firebaseapp.com",
+            projectId: "ygo-genesys-deckbuilder",
+            storageBucket: "ygo-genesys-deckbuilder.firebasestorage.app",
+            messagingSenderId: "776896018562",
+            appId: "1:776896018562:web:1679588266b804a5f8dc9b",
+            measurementId: "G-2NH2ZXC9N3"
+        };
+        // ###############################################################
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+        const db = firebase.firestore();
+
+        const API_BASE_URL = 'https://db.ygoprodeck.com/api/v7/cardinfo.php';
+
+        // --- Authentication Logic ---
+        const loginBtn = document.getElementById('login-btn');
+        const logoutBtn = document.getElementById('logout-btn');
+        const userGreeting = document.getElementById('user-greeting');
+        const saveDeckBtn = document.getElementById('save-deck-btn');
+
+        loginBtn.addEventListener('click', () => {
+            const provider = new firebase.auth.GoogleAuthProvider();
+            auth.signInWithPopup(provider).catch(error => console.error("Login failed:", error));
+        });
+
+        logoutBtn.addEventListener('click', () => auth.signOut());
+
+        auth.onAuthStateChanged(user => {
+            if (user) { // User is signed in
+                loginBtn.style.display = 'none';
+                logoutBtn.style.display = 'inline-block';
+                saveDeckBtn.style.display = 'inline-block';
+                userGreeting.textContent = `Welcome, ${user.displayName}!`;
+                userGreeting.style.display = 'inline';
+                loadDeck(); // Automatically load the user's deck
+            } else { // User is signed out
+                loginBtn.style.display = 'inline-block';
+                logoutBtn.style.display = 'none';
+                saveDeckBtn.style.display = 'none';
+                userGreeting.style.display = 'none';
+                clearAllDecks(); // Clear the board on logout
+            }
+        });
+
+        // --- Core Deckbuilding Logic ---
+        function calculateTotalPoints() {
+            let totalPoints = 0;
+            document.querySelectorAll('.right-panel .card-wrapper').forEach(wrapper => {
+                const cardName = wrapper.querySelector('img.card').alt;
+                if (cardPoints.hasOwnProperty(cardName)) {
+                    totalPoints += cardPoints[cardName];
+                }
+            });
+            document.getElementById('point-total').textContent = `Total Points: ${totalPoints}`;
+        }
+
+        function createCardDisplayElement(cardData, isInDeck = false) {
+            const cardWrapper = document.createElement('div');
+            cardWrapper.className = 'card-wrapper';
+            cardWrapper.draggable = true;
+            
+            const img = document.createElement('img');
+            img.src = cardData.card_images[0].image_url_small;
+            img.alt = cardData.name;
+            img.title = cardData.name;
+            img.className = 'card';
+            
+            cardWrapper.appendChild(img);
+
+            if (cardPoints.hasOwnProperty(cardData.name)) {
+                const pointsDisplay = document.createElement('span');
+                pointsDisplay.className = 'card-points-display';
+                pointsDisplay.textContent = cardPoints[cardData.name];
+                cardWrapper.appendChild(pointsDisplay);
+            }
+
+            cardWrapper.addEventListener('dragstart', (event) => {
+                event.dataTransfer.setData('application/json', JSON.stringify(cardData));
+            });
+
+            if (isInDeck) {
+                cardWrapper.addEventListener('click', () => {
+                    cardWrapper.remove();
+                    calculateTotalPoints();
+                });
+            }
+            return cardWrapper;
+        }
+        
+        function clearAllDecks() {
+            document.getElementById('main-deck-cards').innerHTML = '';
+            document.getElementById('extra-deck-cards').innerHTML = '';
+            document.getElementById('side-deck-cards').innerHTML = '';
+            calculateTotalPoints();
+        }
+        
+        // --- Firestore Save/Load Functions ---
+        function getDeckIds() {
+            const deck = { main: [], extra: [], side: [] };
+            document.querySelectorAll('#main-deck-cards .card-wrapper').forEach(w => deck.main.push(w.dataset.cardId));
+            document.querySelectorAll('#extra-deck-cards .card-wrapper').forEach(w => deck.extra.push(w.dataset.cardId));
+            document.querySelectorAll('#side-deck-cards .card-wrapper').forEach(w => deck.side.push(w.dataset.cardId));
+            return deck;
+        }
+
+        async function saveDeck() {
+            const user = auth.currentUser;
+            if (!user) {
+                alert('You must be logged in to save a deck.');
+                return;
+            }
+            
+            const deckData = getDeckIds();
+            const deckRef = db.collection('decks').doc(user.uid);
+            
+            try {
+                await deckRef.set(deckData);
+                alert('Deck saved successfully!');
+            } catch (error) {
+                console.error("Error saving deck: ", error);
+                alert('Failed to save deck. See console for details.');
+            }
+        }
+        
+        async function loadDeck() {
+            const user = auth.currentUser;
+            if (!user) return;
+            
+            const deckRef = db.collection('decks').doc(user.uid);
+            const docSnap = await deckRef.get();
+
+            if (docSnap.exists) {
+                const deck = docSnap.data();
+                clearAllDecks();
+
+                await Promise.all([
+                    fetchAndDisplayCards(deck.main || [], document.getElementById('main-deck-cards')),
+                    fetchAndDisplayCards(deck.extra || [], document.getElementById('extra-deck-cards')),
+                    fetchAndDisplayCards(deck.side || [], document.getElementById('side-deck-cards'))
+                ]);
+                calculateTotalPoints();
+            } else {
+                console.log("No saved deck found for this user.");
+            }
+        }
+        
+        // --- YDK and Search Logic ---
+        async function fetchAndDisplayCards(cardIds, containerElement) {
+            if (!cardIds || cardIds.length === 0) return;
+            const url = `${API_BASE_URL}?id=${cardIds.join(',')}`;
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+                const cardDataMap = new Map();
+                data.data.forEach(card => cardDataMap.set(card.id.toString(), card));
+                cardIds.forEach(id => {
+                    const cardInfo = cardDataMap.get(id.toString());
+                    if (cardInfo) {
+                        const cardWrapper = createCardDisplayElement(cardInfo, true);
+                        cardWrapper.dataset.cardId = cardInfo.id;
+                        containerElement.appendChild(cardWrapper);
+                    }
+                });
+            } catch (error) {
+                console.error("Failed to fetch cards:", error);
+            }
+        }
+        
+        const deckContainers = document.querySelectorAll('.deck-cards');
+        deckContainers.forEach(container => {
+            container.addEventListener('dragover', (event) => event.preventDefault());
+            container.addEventListener('drop', (event) => {
+                event.preventDefault();
+                const cardDataString = event.dataTransfer.getData('application/json');
+                if(cardDataString) {
+                    const cardData = JSON.parse(cardDataString);
+                    const cardWrapper = createCardDisplayElement(cardData, true);
+                    cardWrapper.dataset.cardId = cardData.id;
+                    container.appendChild(cardWrapper);
+                    calculateTotalPoints();
+                }
+            });
+        });
+
+        function parseYDK(ydkContent) {
+            const lines = ydkContent.split('\n');
+            const deck = { main: [], extra: [], side: [] };
+            let currentSection = '';
+            for (const line of lines) {
+                const trimmedLine = line.trim();
+                if (trimmedLine.startsWith('#main')) currentSection = 'main';
+                else if (trimmedLine.startsWith('#extra')) currentSection = 'extra';
+                else if (trimmedLine.startsWith('!side')) currentSection = 'side';
+                else if (currentSection && /^\d+$/.test(trimmedLine)) {
+                    deck[currentSection].push(trimmedLine);
+                }
+            }
+            return deck;
+        }
+        
+        async function loadDeckFromYDK() {
+            const ydkContent = document.getElementById('ydk-input').value;
+            const deck = parseYDK(ydkContent);
+            clearAllDecks();
+            await Promise.all([
+                fetchAndDisplayCards(deck.main, document.getElementById('main-deck-cards')),
+                fetchAndDisplayCards(deck.extra, document.getElementById('extra-deck-cards')),
+                fetchAndDisplayCards(deck.side, document.getElementById('side-deck-cards'))
+            ]);
+            calculateTotalPoints();
+        }
+
+        const searchBox = document.getElementById('search-box');
+        const searchResultsContainer = document.getElementById('search-results');
+        let searchTimeout;
+        searchBox.addEventListener('keyup', () => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(async () => {
+                const query = searchBox.value;
+                if (query.length < 3) {
+                    searchResultsContainer.innerHTML = '';
+                    return;
+                }
+                const url = `${API_BASE_URL}?fname=${encodeURIComponent(query)}`;
+                try {
+                    const response = await fetch(url);
+                    const data = await response.json();
+                    searchResultsContainer.innerHTML = '';
+                    data.data.forEach(cardData => {
+                        const cardWrapper = createCardDisplayElement(cardData, false);
+                        searchResultsContainer.appendChild(cardWrapper);
+                    });
+                } catch (error) {
+                    searchResultsContainer.innerHTML = '<p>No cards found.</p>';
+                }
+            }, 500);
+        });
+    </script>
+
+</body>
+</html>
